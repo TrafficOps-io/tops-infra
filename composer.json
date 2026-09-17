@@ -1,0 +1,91 @@
+{
+    "$schema": "https://getcomposer.org/schema.json",
+    "name": "trafficops/tops-infra",
+    "description": "Laravel integrations for Cloudflare accounts, DNS and Laravel Cloud domains.",
+    "type": "library",
+    "license": "MIT",
+    "homepage": "https://github.com/trafficops-io/tops-infra",
+    "keywords": [
+        "trafficops",
+        "laravel",
+        "php"
+    ],
+    "support": {
+        "issues": "https://github.com/trafficops-io/tops-infra/issues",
+        "source": "https://github.com/trafficops-io/tops-infra"
+    },
+    "require": {
+        "ext-intl": "*",
+        "illuminate/cache": "^12.0",
+        "illuminate/contracts": "^12.0",
+        "illuminate/database": "^12.0",
+        "illuminate/http": "^12.0",
+        "illuminate/queue": "^12.0",
+        "illuminate/support": "^12.0",
+        "laravel/framework": "^12.0",
+        "php": "^8.4"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.24",
+        "orchestra/testbench": "^10.0",
+        "phpunit/phpunit": "^11.5.3"
+    },
+    "autoload": {
+        "psr-4": {
+            "TrafficOps\\Cloudflare\\": "packages/cloudflare/src/",
+            "TrafficOps\\LaravelCloud\\": "packages/laravel-cloud/src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "TrafficOps\\Cloudflare\\Tests\\": "packages/cloudflare/tests/",
+            "TrafficOps\\LaravelCloud\\Tests\\": "packages/laravel-cloud/tests/"
+        }
+    },
+    "scripts": {
+        "test": "phpunit",
+        "lint": "pint --test",
+        "format": "pint",
+        "check": [
+            "@composer validate --strict",
+            "@lint",
+            "@test"
+        ],
+        "build": "@composer archive --format=zip --dir=dist"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "archive": {
+        "exclude": [
+            "/.github",
+            "/tests",
+            "/packages/*/tests",
+            "/phpunit.xml",
+            "/pint.json",
+            "/composer.lock",
+            "/dist",
+            "/.phpunit*",
+            "/.pint*",
+            "/.gitignore",
+            "/.gitattributes",
+            "/vendor",
+            "/.git",
+            "/.env",
+            "/.env.*",
+            ".DS_Store"
+        ]
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "TrafficOps\\Cloudflare\\CloudflareServiceProvider",
+                "TrafficOps\\LaravelCloud\\LaravelCloudServiceProvider"
+            ],
+            "aliases": {
+                "Cloudflare": "TrafficOps\\Cloudflare\\Facades\\Cloudflare",
+                "LaravelCloud": "TrafficOps\\LaravelCloud\\Facades\\LaravelCloud"
+            }
+        }
+    }
+}
