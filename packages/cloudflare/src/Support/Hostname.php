@@ -32,6 +32,29 @@ final class Hostname
         return $plain === $zone || str_ends_with($plain, '.'.$zone);
     }
 
+    /**
+     * Whether a claim on $claim may hold an expectation named $name.
+     *
+     * An exact claim covers its own hostname and every name beneath it. A
+     * wildcard claim `*.base` covers the wildcard itself and every name beneath
+     * `base` except the apex `base` itself, which is an independent claim. This
+     * is what lets a wildcard claim carry `_acme-challenge.base` or the
+     * `_cf-check-*.base` probe names while never reaching the apex record.
+     */
+    public static function covers(string $claim, string $name): bool
+    {
+        if ($claim === $name) {
+            return true;
+        }
+
+        $base = str_starts_with($claim, '*.') ? substr($claim, 2) : $claim;
+        $nameWildcard = str_starts_with($name, '*.');
+        $plain = $nameWildcard ? substr($name, 2) : $name;
+
+        // `*.base` lies beneath an exact claim on `base`; anything ending in `.base` lies beneath either kind.
+        return ($nameWildcard && $plain === $base) || str_ends_with($plain, '.'.$base);
+    }
+
     public static function overlaps(string $left, string $right): bool
     {
         if ($left === $right) {

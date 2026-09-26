@@ -18,6 +18,7 @@ use TrafficOps\Cloudflare\Events\CloudflareDnsDriftDetected;
 use TrafficOps\Cloudflare\Events\CloudflareDomainStatusChanged;
 use TrafficOps\Cloudflare\Exceptions\CloudflareAuthenticationException;
 use TrafficOps\Cloudflare\Exceptions\CloudflareConflictException;
+use TrafficOps\Cloudflare\Exceptions\CloudflareValidationException;
 use TrafficOps\Cloudflare\Jobs\CheckCloudflareIntegrationJob;
 use TrafficOps\Cloudflare\Models\CloudflareIntegration;
 use TrafficOps\Cloudflare\Models\CloudflareZone;
@@ -134,6 +135,70 @@ final class CloudflareManagerTest extends TestCase
         $this->manager->attachDomain($other, $otherIntegration->id, $otherZone->getKey(), new DomainDefinition('app.example.com', [
             new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
         ]));
+    }
+
+    public function test_expectation_outside_the_claim_hostname_is_rejected(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+
+        try {
+            $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('a.example.com', [
+                new DnsRecordExpectation('CNAME', 'b.example.com', 'origin.example.net'),
+            ]));
+            $this->fail('Expected validation exception.');
+        } catch (CloudflareValidationException $exception) {
+            $this->assertStringContainsString('b.example.com', $exception->getMessage());
+            $this->assertStringContainsString('a.example.com', $exception->getMessage());
+            $this->assertDatabaseCount('cloudflare_domains', 0);
+        }
+    }
+
+    public function test_expectation_beneath_the_claim_hostname_is_accepted(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+
+        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+            new DnsRecordExpectation('TXT', '_acme-challenge.app.example.com', 'token'),
+        ]));
+
+        $this->assertCount(2, $zone->domains()->findOrFail($domain->id)->records);
+    }
+
+    public function test_wildcard_claim_accepts_names_beneath_its_base_but_not_the_apex(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $otherZone = $owner->cloudflareIntegrations()->firstOrFail()->accounts()->with('zones')->get()->pluck('zones')->flatten()->firstWhere('name', 'example.net');
+
+        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('*.example.com', [
+            new DnsRecordExpectation('CNAME', '*.example.com', 'origin.example.net', proxied: true),
+            new DnsRecordExpectation('TXT', '_acme-challenge.example.com', 'token'),
+        ]));
+        $this->assertCount(2, $zone->domains()->findOrFail($domain->id)->records);
+
+        $this->expectException(CloudflareValidationException::class);
+        $this->manager->attachDomain($owner, $integration->id, $otherZone->getKey(), new DomainDefinition('*.example.net', [
+            new DnsRecordExpectation('A', 'example.net', '203.0.113.10'),
+        ]));
+    }
+
+    public function test_replace_domain_expectations_rejects_names_outside_the_claim(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+
+        try {
+            $this->manager->replaceDomainExpectations($owner, $domain->id, [
+                new DnsRecordExpectation('CNAME', 'other.example.com', 'origin.example.net'),
+            ]);
+            $this->fail('Expected validation exception.');
+        } catch (CloudflareValidationException) {
+            $records = $zone->domains()->findOrFail($domain->id)->records()->where('desired', true)->get();
+            $this->assertCount(1, $records);
+            $this->assertSame('app.example.com', $records->first()->name);
+        }
     }
 
     public function test_explicit_cleanup_deletes_only_managed_records(): void

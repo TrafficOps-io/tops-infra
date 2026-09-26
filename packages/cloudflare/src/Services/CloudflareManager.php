@@ -161,7 +161,7 @@ final class CloudflareManager implements CloudflareManagerContract
         if (! Hostname::belongsToZone($definition->hostname, $zone->name)) {
             throw new CloudflareValidationException("Domain [{$definition->hostname}] is outside zone [{$zone->name}].");
         }
-        $this->validateExpectations($definition->records, $zone->name);
+        $this->validateExpectations($definition->records, $zone->name, $definition->hostname);
 
         $store = $this->cache->store(config('cloudflare.claim_lock_store'));
 
@@ -211,7 +211,7 @@ final class CloudflareManager implements CloudflareManagerContract
         }
 
         $domain = $this->ownedDomain($owner, $domainId);
-        $this->validateExpectations($records, $domain->zone->name);
+        $this->validateExpectations($records, $domain->zone->name, $domain->hostname);
 
         DB::transaction(function () use ($domain, $records) {
             $domain->records()->update(['desired' => false]);
@@ -609,8 +609,14 @@ final class CloudflareManager implements CloudflareManagerContract
         }
     }
 
-    /** @param list<DnsRecordExpectation> $records */
-    private function validateExpectations(array $records, string $zone): void
+    /**
+     * Every expectation of a claim must sit inside the zone and be covered by
+     * the claim hostname; otherwise a claim on `a.example.com` could manage
+     * records for `b.example.com` and bypass the cross-owner overlap check.
+     *
+     * @param  list<DnsRecordExpectation>  $records
+     */
+    private function validateExpectations(array $records, string $zone, string $hostname): void
     {
         $signatures = [];
         foreach ($records as $record) {
@@ -619,6 +625,12 @@ final class CloudflareManager implements CloudflareManagerContract
             }
             if (! Hostname::belongsToZone($record->name, $zone)) {
                 throw new CloudflareValidationException("DNS record [{$record->name}] is outside zone [$zone].");
+            }
+            if (! Hostname::covers($hostname, $record->name)) {
+                throw new CloudflareValidationException(
+                    "DNS record [{$record->name}] is outside claim [$hostname]: an expectation name must equal the claim hostname or lie beneath it"
+                    .' (for a wildcard claim, beneath its base but not the apex itself).',
+                );
             }
             if (isset($signatures[$record->signature()])) {
                 throw new CloudflareValidationException('Duplicate DNS record expectation.');
