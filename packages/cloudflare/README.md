@@ -1,6 +1,6 @@
 # trafficops.io Cloudflare
 
-Laravel 12 module for connecting customer-owned Cloudflare API tokens, discovering accounts and zones, binding exact or wildcard domains, provisioning expected DNS records, and monitoring drift.
+Laravel 12 module for connecting customer-owned Cloudflare API tokens, discovering accounts and zones, claiming exact or wildcard hostnames, reconciling the DNS records each claim expects, and detecting drift.
 
 This headless module is included in the MIT-licensed `trafficops/tops-infra` package.
 

@@ -9,6 +9,7 @@ use TrafficOps\Cloudflare\Contracts\CloudflareClientContract;
 use TrafficOps\Cloudflare\Contracts\CloudflareManagerContract;
 use TrafficOps\Cloudflare\Contracts\PublicDnsResolverContract;
 use TrafficOps\Cloudflare\DTO\DnsRecordExpectation;
+use TrafficOps\Cloudflare\DTO\DomainData;
 use TrafficOps\Cloudflare\DTO\DomainDefinition;
 use TrafficOps\Cloudflare\DTO\IntegrationData;
 use TrafficOps\Cloudflare\Enums\DomainStatus;
@@ -129,7 +130,7 @@ final class CloudflareManagerTest extends TestCase
 
         $other = TestOwner::query()->create(['name' => 'Other']);
         $otherIntegration = $other->connectCloudflare('another-token');
-        $otherZone = $other->cloudflareIntegrations()->firstOrFail()->accounts()->firstOrFail()->zones()->where('name', 'example.com')->firstOrFail();
+        $otherZone = $this->zoneNamed($other, 'example.com');
 
         $this->expectException(CloudflareConflictException::class);
         $this->manager->attachDomain($other, $otherIntegration->id, $otherZone->getKey(), new DomainDefinition('app.example.com', [
@@ -169,10 +170,8 @@ final class CloudflareManagerTest extends TestCase
 
         $other = TestOwner::query()->create(['name' => 'Other']);
         $otherIntegration = $other->connectCloudflare('another-token');
-        $otherZone = $other->cloudflareIntegrations()->firstOrFail()->accounts()->firstOrFail()->zones()->where('name', 'example.com')->firstOrFail();
-        $claim = $this->manager->attachDomain($other, $otherIntegration->id, $otherZone->getKey(), new DomainDefinition('sub.app.example.com', [
-            new DnsRecordExpectation('CNAME', 'sub.app.example.com', 'origin.example.net'),
-        ]));
+        $otherZone = $this->zoneNamed($other, 'example.com');
+        $claim = $this->attachClaim($other, $otherIntegration, $otherZone, 'sub.app.example.com');
 
         $this->assertSame('sub.app.example.com', $claim->hostname);
     }
@@ -180,13 +179,13 @@ final class CloudflareManagerTest extends TestCase
     public function test_wildcard_claim_accepts_names_beneath_its_base_but_not_the_apex(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $otherZone = $owner->cloudflareIntegrations()->firstOrFail()->accounts()->with('zones')->get()->pluck('zones')->flatten()->firstWhere('name', 'example.net');
+        $otherZone = $this->zoneNamed($owner, 'example.net');
 
-        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('*.example.com', [
+        $claim = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('*.example.com', [
             new DnsRecordExpectation('CNAME', '*.example.com', 'origin.example.net', proxied: true),
             new DnsRecordExpectation('TXT', '_acme-challenge.example.com', 'token'),
         ]));
-        $this->assertCount(2, $zone->domains()->findOrFail($domain->id)->records);
+        $this->assertCount(2, $zone->domains()->findOrFail($claim->id)->records);
 
         $this->expectException(CloudflareValidationException::class);
         $this->manager->attachDomain($owner, $integration->id, $otherZone->getKey(), new DomainDefinition('*.example.net', [
@@ -197,17 +196,15 @@ final class CloudflareManagerTest extends TestCase
     public function test_replace_domain_expectations_rejects_names_outside_the_claim(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
+        $claim = $this->attachClaim($owner, $integration, $zone);
 
         try {
-            $this->manager->replaceDomainExpectations($owner, $domain->id, [
+            $this->manager->replaceDomainExpectations($owner, $claim->id, [
                 new DnsRecordExpectation('CNAME', 'other.example.com', 'origin.example.net'),
             ]);
             $this->fail('Expected validation exception.');
         } catch (CloudflareValidationException) {
-            $records = $zone->domains()->findOrFail($domain->id)->records()->where('desired', true)->get();
+            $records = $zone->domains()->findOrFail($claim->id)->records()->where('desired', true)->get();
             $this->assertCount(1, $records);
             $this->assertSame('app.example.com', $records->first()->name);
         }
@@ -339,26 +336,22 @@ final class CloudflareManagerTest extends TestCase
     public function test_claims_in_an_inaccessible_zone_transition_to_error(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
+        $claim = $this->attachClaim($owner, $integration, $zone);
         $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
 
         $this->manager->sync($owner, $integration->id);
-        $claim = $zone->domains()->findOrFail($domain->id);
+        $stored = $zone->domains()->findOrFail($claim->id);
 
         $this->assertSame('inaccessible', $zone->refresh()->status);
-        $this->assertSame(DomainStatus::Error, $claim->status);
-        $this->assertSame('zone_inaccessible', $claim->last_error_code);
-        $this->assertNotNull($claim->last_error_message);
+        $this->assertSame(DomainStatus::Error, $stored->status);
+        $this->assertSame('zone_inaccessible', $stored->last_error_code);
+        $this->assertNotNull($stored->last_error_message);
     }
 
     public function test_sync_marks_integration_degraded_when_a_zone_becomes_inaccessible(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
+        $this->attachClaim($owner, $integration, $zone);
         $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
 
         $result = $this->manager->sync($owner, $integration->id);
@@ -369,28 +362,22 @@ final class CloudflareManagerTest extends TestCase
     public function test_sync_leaves_claims_in_still_accessible_zones_untouched(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $otherZone = $owner->cloudflareIntegrations()->firstOrFail()->accounts()->with('zones')->get()->pluck('zones')->flatten()->firstWhere('name', 'example.net');
-        $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
-        $survivor = $this->manager->attachDomain($owner, $integration->id, $otherZone->getKey(), new DomainDefinition('app.example.net', [
-            new DnsRecordExpectation('CNAME', 'app.example.net', 'origin.example.org'),
-        ]));
+        $otherZone = $this->zoneNamed($owner, 'example.net');
+        $this->attachClaim($owner, $integration, $zone);
+        $claim = $this->attachClaim($owner, $integration, $otherZone, 'app.example.net');
         $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
 
         $this->manager->sync($owner, $integration->id);
-        $claim = $otherZone->domains()->findOrFail($survivor->id);
+        $stored = $otherZone->domains()->findOrFail($claim->id);
 
-        $this->assertSame(DomainStatus::Pending, $claim->status);
-        $this->assertNull($claim->last_error_code);
+        $this->assertSame(DomainStatus::Pending, $stored->status);
+        $this->assertNull($stored->last_error_code);
     }
 
     public function test_zone_inaccessible_transition_is_reported_once(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
+        $this->attachClaim($owner, $integration, $zone);
         $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
         Event::fake([CloudflareDomainStatusChanged::class]);
         $this->app->forgetInstance(CloudflareManagerContract::class);
@@ -407,33 +394,29 @@ final class CloudflareManagerTest extends TestCase
     public function test_check_does_not_flip_claims_in_an_inaccessible_zone_to_drifted(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
-        $this->manager->reconcileDomain($owner, $domain->id);
+        $claim = $this->attachClaim($owner, $integration, $zone);
+        $this->manager->reconcileDomain($owner, $claim->id);
         $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
 
         $result = $this->manager->checkIntegration($owner, $integration->id);
 
         $this->assertSame(DomainStatus::Error, $result->domains[0]->status);
-        $this->assertSame('zone_inaccessible', $zone->domains()->findOrFail($domain->id)->last_error_code);
+        $this->assertSame('zone_inaccessible', $zone->domains()->findOrFail($claim->id)->last_error_code);
         $this->assertSame(IntegrationStatus::Degraded, $result->status);
     }
 
     public function test_claims_in_a_zone_that_disappears_during_a_check_transition_to_error(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
-        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-        ]));
-        $this->manager->reconcileDomain($owner, $domain->id);
+        $claim = $this->attachClaim($owner, $integration, $zone);
+        $this->manager->reconcileDomain($owner, $claim->id);
         // The zone is still listed but its records 404: it vanished between the two API calls of the same Check.
         $this->client->missingZones = [$zone->cloudflare_id];
 
         $result = $this->manager->checkIntegration($owner, $integration->id);
 
         $this->assertSame(DomainStatus::Error, $result->domains[0]->status);
-        $this->assertSame('zone_inaccessible', $zone->domains()->findOrFail($domain->id)->last_error_code);
+        $this->assertSame('zone_inaccessible', $zone->domains()->findOrFail($claim->id)->last_error_code);
         $this->assertSame('inaccessible', $zone->refresh()->status);
         $this->assertSame(IntegrationStatus::Degraded, $result->status);
     }
@@ -460,9 +443,24 @@ final class CloudflareManagerTest extends TestCase
     {
         $owner = TestOwner::query()->create(['name' => 'Owner']);
         $integration = $owner->connectCloudflare('valid-token');
-        $zone = $owner->cloudflareIntegrations()->firstOrFail()->accounts()->firstOrFail()->zones()->where('name', 'example.com')->firstOrFail();
 
-        return [$owner, $integration, $zone];
+        return [$owner, $integration, $this->zoneNamed($owner, 'example.com')];
+    }
+
+    private function zoneNamed(TestOwner $owner, string $name): CloudflareZone
+    {
+        return CloudflareZone::query()
+            ->where('name', $name)
+            ->whereHas('account.integration', fn ($query) => $query->where('owner_id', (string) $owner->getKey()))
+            ->firstOrFail();
+    }
+
+    /** Claim $hostname with a single CNAME expectation on the hostname itself. */
+    private function attachClaim(TestOwner $owner, IntegrationData $integration, CloudflareZone $zone, string $hostname = 'app.example.com'): DomainData
+    {
+        return $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition($hostname, [
+            new DnsRecordExpectation('CNAME', $hostname, 'origin.example.net'),
+        ]));
     }
 
     /** @return array<string, mixed> */

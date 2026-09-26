@@ -46,7 +46,10 @@ use TrafficOps\Cloudflare\Support\ModelResolver;
 final class CloudflareManager implements CloudflareManagerContract
 {
     /** Status of an account or zone that a Sync no longer sees through the integration. */
-    private const ZONE_INACCESSIBLE = 'inaccessible';
+    private const STATUS_INACCESSIBLE = 'inaccessible';
+
+    /** last_error_code of a claim whose zone is inaccessible. */
+    private const ERROR_ZONE_INACCESSIBLE = 'zone_inaccessible';
 
     public function __construct(
         private readonly CloudflareClientContract $client,
@@ -392,20 +395,17 @@ final class CloudflareManager implements CloudflareManagerContract
 
         foreach ($domains as $domain) {
             $zoneKey = (string) $domain->zone->getKey();
-            if ($domain->zone->status === self::ZONE_INACCESSIBLE) {
-                // The Sync above already found the zone gone; there is nothing to read for this claim.
-                $status = $this->failClaimInInaccessibleZone($domain);
-                $degraded = true;
-                $results[] = DomainData::fromModel($domain->refresh());
-
-                continue;
-            }
             try {
-                $remoteByZone[$zoneKey] ??= $this->client->listDnsRecords($integration->api_token, $domain->zone->cloudflare_id);
-                $status = $this->checkDomain($domain, $remoteByZone[$zoneKey]);
+                if ($domain->zone->status === self::STATUS_INACCESSIBLE) {
+                    // The Sync above already found the zone gone; there is nothing to read for this claim.
+                    $status = $this->failClaimInInaccessibleZone($domain);
+                } else {
+                    $remoteByZone[$zoneKey] ??= $this->client->listDnsRecords($integration->api_token, $domain->zone->cloudflare_id);
+                    $status = $this->checkDomain($domain, $remoteByZone[$zoneKey]);
+                }
             } catch (CloudflareNotFoundException) {
                 // The zone vanished between listZones and listDnsRecords: same transition as a Sync would make.
-                $domain->zone->update(['status' => self::ZONE_INACCESSIBLE]);
+                $domain->zone->update(['status' => self::STATUS_INACCESSIBLE]);
                 $status = $this->failClaimInInaccessibleZone($domain);
             } catch (CloudflarePermissionException $exception) {
                 $this->transitionDomain($domain, DomainStatus::Error, 'permission', $exception->getMessage());
@@ -548,9 +548,9 @@ final class CloudflareManager implements CloudflareManagerContract
     private function persistZones(CloudflareIntegration $integration, array $zones): void
     {
         $now = now();
-        $integration->accounts()->update(['status' => self::ZONE_INACCESSIBLE]);
+        $integration->accounts()->update(['status' => self::STATUS_INACCESSIBLE]);
         foreach ($integration->accounts as $account) {
-            $account->zones()->update(['status' => self::ZONE_INACCESSIBLE]);
+            $account->zones()->update(['status' => self::STATUS_INACCESSIBLE]);
         }
 
         foreach ($zones as $remoteZone) {
@@ -577,7 +577,7 @@ final class CloudflareManager implements CloudflareManagerContract
         $integration->update(['last_synced_at' => $now]);
 
         $this->integrationDomains($integration)
-            ->filter(fn (CloudflareDomain $domain) => $domain->zone->status === self::ZONE_INACCESSIBLE)
+            ->filter(fn (CloudflareDomain $domain) => $domain->zone->status === self::STATUS_INACCESSIBLE)
             ->each($this->failClaimInInaccessibleZone(...));
     }
 
@@ -587,11 +587,11 @@ final class CloudflareManager implements CloudflareManagerContract
      */
     private function failClaimInInaccessibleZone(CloudflareDomain $domain): DomainStatus
     {
-        if ($domain->status !== DomainStatus::Error || $domain->last_error_code !== 'zone_inaccessible') {
+        if ($domain->status !== DomainStatus::Error || $domain->last_error_code !== self::ERROR_ZONE_INACCESSIBLE) {
             $this->transitionDomain(
                 $domain,
                 DomainStatus::Error,
-                'zone_inaccessible',
+                self::ERROR_ZONE_INACCESSIBLE,
                 "Zone [{$domain->zone->name}] is no longer accessible through this integration.",
             );
         }
