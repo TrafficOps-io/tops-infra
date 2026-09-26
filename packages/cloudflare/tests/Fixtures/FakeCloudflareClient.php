@@ -4,6 +4,7 @@ namespace TrafficOps\Cloudflare\Tests\Fixtures;
 
 use TrafficOps\Cloudflare\Contracts\CloudflareClientContract;
 use TrafficOps\Cloudflare\Exceptions\CloudflareAuthenticationException;
+use TrafficOps\Cloudflare\Exceptions\CloudflareNotFoundException;
 
 final class FakeCloudflareClient implements CloudflareClientContract
 {
@@ -17,6 +18,9 @@ final class FakeCloudflareClient implements CloudflareClientContract
 
     /** @var list<string> */
     public array $deleted = [];
+
+    /** @var list<string> Zone IDs whose DNS records answer 404, as Cloudflare does for a zone the token can no longer see. */
+    public array $missingZones = [];
 
     public function verifyToken(string $token): array
     {
@@ -34,6 +38,10 @@ final class FakeCloudflareClient implements CloudflareClientContract
 
     public function listDnsRecords(string $token, string $zoneId): array
     {
+        if (in_array($zoneId, $this->missingZones, true)) {
+            throw new CloudflareNotFoundException("Zone [$zoneId] not found.");
+        }
+
         return $this->records[$zoneId] ?? [];
     }
 

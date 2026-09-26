@@ -45,6 +45,9 @@ use TrafficOps\Cloudflare\Support\ModelResolver;
 
 final class CloudflareManager implements CloudflareManagerContract
 {
+    /** Status of an account or zone that a Sync no longer sees through the integration. */
+    private const ZONE_INACCESSIBLE = 'inaccessible';
+
     public function __construct(
         private readonly CloudflareClientContract $client,
         private readonly PublicDnsResolverContract $dns,
@@ -389,9 +392,21 @@ final class CloudflareManager implements CloudflareManagerContract
 
         foreach ($domains as $domain) {
             $zoneKey = (string) $domain->zone->getKey();
+            if ($domain->zone->status === self::ZONE_INACCESSIBLE) {
+                // The Sync above already found the zone gone; there is nothing to read for this claim.
+                $status = $this->failClaimInInaccessibleZone($domain);
+                $degraded = true;
+                $results[] = DomainData::fromModel($domain->refresh());
+
+                continue;
+            }
             try {
                 $remoteByZone[$zoneKey] ??= $this->client->listDnsRecords($integration->api_token, $domain->zone->cloudflare_id);
                 $status = $this->checkDomain($domain, $remoteByZone[$zoneKey]);
+            } catch (CloudflareNotFoundException) {
+                // The zone vanished between listZones and listDnsRecords: same transition as a Sync would make.
+                $domain->zone->update(['status' => self::ZONE_INACCESSIBLE]);
+                $status = $this->failClaimInInaccessibleZone($domain);
             } catch (CloudflarePermissionException $exception) {
                 $this->transitionDomain($domain, DomainStatus::Error, 'permission', $exception->getMessage());
                 $this->transitionIntegration($integration, IntegrationStatus::Degraded, 'permission', $exception->getMessage());
@@ -522,13 +537,19 @@ final class CloudflareManager implements CloudflareManagerContract
         return $integration;
     }
 
-    /** @param list<array<string, mixed>> $zones */
+    /**
+     * Sync: refresh the accounts and zones an integration can see. Zones that
+     * disappeared are marked inaccessible, never deleted, and every claim inside
+     * such a zone transitions to Error.
+     *
+     * @param  list<array<string, mixed>>  $zones
+     */
     private function persistZones(CloudflareIntegration $integration, array $zones): void
     {
         $now = now();
-        $integration->accounts()->update(['status' => 'inaccessible']);
+        $integration->accounts()->update(['status' => self::ZONE_INACCESSIBLE]);
         foreach ($integration->accounts as $account) {
-            $account->zones()->update(['status' => 'inaccessible']);
+            $account->zones()->update(['status' => self::ZONE_INACCESSIBLE]);
         }
 
         foreach ($zones as $remoteZone) {
@@ -553,6 +574,28 @@ final class CloudflareManager implements CloudflareManagerContract
             );
         }
         $integration->update(['last_synced_at' => $now]);
+
+        $this->integrationDomains($integration)
+            ->filter(fn (CloudflareDomain $domain) => $domain->zone->status === self::ZONE_INACCESSIBLE)
+            ->each($this->failClaimInInaccessibleZone(...));
+    }
+
+    /**
+     * A claim whose zone is inaccessible is in Error; the transition (and its
+     * event) happens once, and a later Sync or Check leaves it untouched.
+     */
+    private function failClaimInInaccessibleZone(CloudflareDomain $domain): DomainStatus
+    {
+        if ($domain->status !== DomainStatus::Error || $domain->last_error_code !== 'zone_inaccessible') {
+            $this->transitionDomain(
+                $domain,
+                DomainStatus::Error,
+                'zone_inaccessible',
+                "Zone [{$domain->zone->name}] is no longer accessible through this integration.",
+            );
+        }
+
+        return DomainStatus::Error;
     }
 
     /** @param list<DnsRecordExpectation> $records */

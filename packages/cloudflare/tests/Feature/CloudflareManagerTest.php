@@ -259,6 +259,76 @@ final class CloudflareManagerTest extends TestCase
         $this->assertSame(['active', 'inaccessible'], array_values(array_unique(array_column($accounts, 'status'))));
     }
 
+    public function test_claims_in_an_inaccessible_zone_transition_to_error(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+        $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
+
+        $this->manager->sync($owner, $integration->id);
+        $claim = $zone->domains()->findOrFail($domain->id);
+
+        $this->assertSame('inaccessible', $zone->refresh()->status);
+        $this->assertSame(DomainStatus::Error, $claim->status);
+        $this->assertSame('zone_inaccessible', $claim->last_error_code);
+        $this->assertNotNull($claim->last_error_message);
+    }
+
+    public function test_zone_inaccessible_transition_is_reported_once(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+        $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
+        Event::fake([CloudflareDomainStatusChanged::class]);
+        $this->app->forgetInstance(CloudflareManagerContract::class);
+        $this->manager = $this->app->make(CloudflareManagerContract::class);
+
+        $this->manager->sync($owner, $integration->id);
+        $this->manager->sync($owner, $integration->id);
+
+        Event::assertDispatchedTimes(CloudflareDomainStatusChanged::class, 1);
+        Event::assertDispatched(CloudflareDomainStatusChanged::class, fn ($event) => $event->previousStatus === DomainStatus::Pending
+            && $event->domain->status === DomainStatus::Error);
+    }
+
+    public function test_check_does_not_flip_claims_in_an_inaccessible_zone_to_drifted(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+        $this->manager->reconcileDomain($owner, $domain->id);
+        $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
+
+        $result = $this->manager->checkIntegration($owner, $integration->id);
+
+        $this->assertSame(DomainStatus::Error, $result->domains[0]->status);
+        $this->assertSame('zone_inaccessible', $zone->domains()->findOrFail($domain->id)->last_error_code);
+        $this->assertSame(IntegrationStatus::Degraded, $result->status);
+    }
+
+    public function test_claims_in_a_zone_that_disappears_during_a_check_transition_to_error(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+        $this->manager->reconcileDomain($owner, $domain->id);
+        // The zone is still listed but its records 404: it vanished between the two API calls of the same Check.
+        $this->client->missingZones = [$zone->cloudflare_id];
+
+        $result = $this->manager->checkIntegration($owner, $integration->id);
+
+        $this->assertSame(DomainStatus::Error, $result->domains[0]->status);
+        $this->assertSame('zone_inaccessible', $zone->domains()->findOrFail($domain->id)->last_error_code);
+        $this->assertSame('inaccessible', $zone->refresh()->status);
+        $this->assertSame(IntegrationStatus::Degraded, $result->status);
+    }
+
     public function test_status_events_are_only_emitted_on_transitions(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
