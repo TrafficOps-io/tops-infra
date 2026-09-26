@@ -194,6 +194,44 @@ final class CloudflareManagerTest extends TestCase
         $this->assertSame($integration->id, $owner->cloudflareIntegrations()->firstOrFail()->getKey());
     }
 
+    public function test_invalid_integrations_are_not_dispatched_for_checks(): void
+    {
+        Queue::fake();
+        [, $integration] = $this->connectedOwner();
+        CloudflareIntegration::query()->whereKey($integration->id)->update(['status' => IntegrationStatus::Invalid->value]);
+
+        $this->artisan('cloudflare:dispatch-checks')->assertSuccessful();
+
+        Queue::assertNotPushed(CheckCloudflareIntegrationJob::class);
+    }
+
+    public function test_integrations_with_expired_tokens_are_not_dispatched_for_checks(): void
+    {
+        Queue::fake();
+        [, $expired] = $this->connectedOwner();
+        [, $unexpired] = $this->connectedOwner();
+        CloudflareIntegration::query()->whereKey($expired->id)->update(['token_expires_at' => now()->subMinute()]);
+        CloudflareIntegration::query()->whereKey($unexpired->id)->update(['token_expires_at' => now()->addDay()]);
+
+        $this->artisan('cloudflare:dispatch-checks')->assertSuccessful();
+
+        Queue::assertPushed(CheckCloudflareIntegrationJob::class, 1);
+        Queue::assertPushed(CheckCloudflareIntegrationJob::class, fn ($job) => $job->integrationId === $unexpired->id);
+    }
+
+    public function test_degraded_and_unreachable_integrations_are_still_dispatched_for_checks(): void
+    {
+        Queue::fake();
+        [, $degraded] = $this->connectedOwner();
+        [, $unreachable] = $this->connectedOwner();
+        CloudflareIntegration::query()->whereKey($degraded->id)->update(['status' => IntegrationStatus::Degraded->value]);
+        CloudflareIntegration::query()->whereKey($unreachable->id)->update(['status' => IntegrationStatus::Unreachable->value]);
+
+        $this->artisan('cloudflare:dispatch-checks')->assertSuccessful();
+
+        Queue::assertPushed(CheckCloudflareIntegrationJob::class, 2);
+    }
+
     public function test_public_resolver_failure_does_not_report_dns_drift(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
