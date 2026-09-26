@@ -509,15 +509,16 @@ final class CloudflareManager implements CloudflareManagerContract
                     'token_expires_at' => isset($verification['expires_on']) ? Carbon::parse($verification['expires_on']) : null,
                     'last_verified_at' => now(),
                 ];
-                if ($activate) {
-                    $attributes += [
-                        'status' => IntegrationStatus::Active,
-                        'last_error_code' => null,
-                        'last_error_message' => null,
-                    ];
-                }
                 $integration->update($attributes);
                 $this->persistZones($integration, $zones);
+                if ($activate) {
+                    // Degraded: the token works but at least one claim is drifted, errored or unreachable.
+                    $integration->update([
+                        'status' => $this->hasUnhealthyClaims($integration) ? IntegrationStatus::Degraded : IntegrationStatus::Active,
+                        'last_error_code' => null,
+                        'last_error_message' => null,
+                    ]);
+                }
             });
         } catch (CloudflareAuthenticationException $exception) {
             $this->transitionIntegration($integration, IntegrationStatus::Invalid, 'authentication', $exception->getMessage());
@@ -703,6 +704,16 @@ final class CloudflareManager implements CloudflareManagerContract
         }
 
         return $domain;
+    }
+
+    private function hasUnhealthyClaims(CloudflareIntegration $integration): bool
+    {
+        $domainClass = ModelResolver::class('domain');
+
+        return $domainClass::query()
+            ->whereHas('zone.account', fn ($query) => $query->where('integration_id', $integration->getKey()))
+            ->whereIn('status', [DomainStatus::Drifted->value, DomainStatus::Error->value, DomainStatus::Unreachable->value])
+            ->exists();
     }
 
     /** @return Collection<int, CloudflareDomain> */

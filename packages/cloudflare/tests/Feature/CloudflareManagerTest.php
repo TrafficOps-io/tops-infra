@@ -341,6 +341,38 @@ final class CloudflareManagerTest extends TestCase
         $this->assertNotNull($claim->last_error_message);
     }
 
+    public function test_sync_marks_integration_degraded_when_a_zone_becomes_inaccessible(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+        $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
+
+        $result = $this->manager->sync($owner, $integration->id);
+
+        $this->assertSame(IntegrationStatus::Degraded, $result->status);
+    }
+
+    public function test_sync_leaves_claims_in_still_accessible_zones_untouched(): void
+    {
+        [$owner, $integration, $zone] = $this->connectedOwner();
+        $otherZone = $owner->cloudflareIntegrations()->firstOrFail()->accounts()->with('zones')->get()->pluck('zones')->flatten()->firstWhere('name', 'example.net');
+        $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+        ]));
+        $survivor = $this->manager->attachDomain($owner, $integration->id, $otherZone->getKey(), new DomainDefinition('app.example.net', [
+            new DnsRecordExpectation('CNAME', 'app.example.net', 'origin.example.org'),
+        ]));
+        $this->client->zones = [$this->zone('zone-two', 'account-two', 'example.net')];
+
+        $this->manager->sync($owner, $integration->id);
+        $claim = $otherZone->domains()->findOrFail($survivor->id);
+
+        $this->assertSame(DomainStatus::Pending, $claim->status);
+        $this->assertNull($claim->last_error_code);
+    }
+
     public function test_zone_inaccessible_transition_is_reported_once(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
