@@ -153,16 +153,28 @@ final class CloudflareManagerTest extends TestCase
         }
     }
 
-    public function test_expectation_beneath_the_claim_hostname_is_accepted(): void
+    public function test_exact_claim_cannot_hold_expectations_beneath_itself_so_another_owner_may_claim_there(): void
     {
         [$owner, $integration, $zone] = $this->connectedOwner();
 
-        $domain = $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
-            new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
-            new DnsRecordExpectation('TXT', '_acme-challenge.app.example.com', 'token'),
+        try {
+            $this->manager->attachDomain($owner, $integration->id, $zone->getKey(), new DomainDefinition('app.example.com', [
+                new DnsRecordExpectation('CNAME', 'app.example.com', 'origin.example.net'),
+                new DnsRecordExpectation('CNAME', 'sub.app.example.com', 'origin.example.net'),
+            ]));
+            $this->fail('Expected validation exception.');
+        } catch (CloudflareValidationException $exception) {
+            $this->assertStringContainsString('sub.app.example.com', $exception->getMessage());
+        }
+
+        $other = TestOwner::query()->create(['name' => 'Other']);
+        $otherIntegration = $other->connectCloudflare('another-token');
+        $otherZone = $other->cloudflareIntegrations()->firstOrFail()->accounts()->firstOrFail()->zones()->where('name', 'example.com')->firstOrFail();
+        $claim = $this->manager->attachDomain($other, $otherIntegration->id, $otherZone->getKey(), new DomainDefinition('sub.app.example.com', [
+            new DnsRecordExpectation('CNAME', 'sub.app.example.com', 'origin.example.net'),
         ]));
 
-        $this->assertCount(2, $zone->domains()->findOrFail($domain->id)->records);
+        $this->assertSame('sub.app.example.com', $claim->hostname);
     }
 
     public function test_wildcard_claim_accepts_names_beneath_its_base_but_not_the_apex(): void

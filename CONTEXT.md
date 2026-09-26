@@ -53,7 +53,7 @@ _Avoid_: domain, hostname (for the entity), attachment
 
 **Expectation**:
 One DNS record a claim requires to exist in the zone. Its name is the claim's
-hostname or lies beneath it.
+hostname, or lies beneath the base of a wildcard claim.
 _Avoid_: desired record, definition
 
 **Managed record**:

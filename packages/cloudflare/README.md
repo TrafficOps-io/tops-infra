@@ -34,7 +34,7 @@ Cloudflare::reconcileDomain($owner, $domain->id); // explicit write
 Cloudflare::checkIntegration($owner, $integration->id); // read-only
 ```
 
-Each expected record's name must equal the domain's hostname or lie beneath it; for a wildcard domain `*.example.com` any name beneath `example.com` other than the apex qualifies (so `_acme-challenge.example.com` is fine, `example.com` is not). `attachDomain` and `replaceDomainExpectations` reject anything else.
+An expectation's name is the claim's hostname, or lies beneath the base of a wildcard claim: an exact claim on `app.example.com` may only expect records named `app.example.com`, while a wildcard claim `*.example.com` may expect `*.example.com` and any name beneath `example.com` other than the apex (so `_acme-challenge.example.com` is fine, `example.com` is not). `attachDomain` and `replaceDomainExpectations` reject anything else.
 
 Tokens should have `Zone Read` and `DNS Read`; explicit provisioning also needs `DNS Write`. Existing matching records are adopted but never modified or deleted. Only records created by this package are eligible for explicit cleanup.
 

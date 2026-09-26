@@ -27,11 +27,12 @@ final class HostnameTest extends TestCase
         return [['example'], ['foo.*.example.com'], ['*.*.example.com'], ['-bad.example.com']];
     }
 
-    public function test_exact_claim_covers_itself_and_names_beneath_it(): void
+    public function test_exact_claim_covers_only_its_own_hostname(): void
     {
         $this->assertTrue(Hostname::covers('app.example.com', 'app.example.com'));
-        $this->assertTrue(Hostname::covers('app.example.com', '_acme-challenge.app.example.com'));
-        $this->assertTrue(Hostname::covers('app.example.com', '*.app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', '_acme-challenge.app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', 'sub.app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', '*.app.example.com'));
         $this->assertFalse(Hostname::covers('app.example.com', 'example.com'));
         $this->assertFalse(Hostname::covers('app.example.com', 'other.example.com'));
         $this->assertFalse(Hostname::covers('app.example.com', 'notapp.example.com'));

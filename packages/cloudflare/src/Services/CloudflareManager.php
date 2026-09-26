@@ -629,8 +629,8 @@ final class CloudflareManager implements CloudflareManagerContract
             }
             if (! Hostname::covers($hostname, $record->name)) {
                 throw new CloudflareValidationException(
-                    "DNS record [{$record->name}] is outside claim [$hostname]: an expectation name must equal the claim hostname or lie beneath it"
-                    .' (for a wildcard claim, beneath its base but not the apex itself).',
+                    "DNS record [{$record->name}] is outside claim [$hostname]: an expectation name is the claim's hostname,"
+                    .' or lies beneath the base of a wildcard claim (never the apex itself).',
                 );
             }
             if (isset($signatures[$record->signature()])) {
