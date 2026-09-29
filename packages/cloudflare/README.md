@@ -1,6 +1,6 @@
 # trafficops.io Cloudflare
 
-Laravel 12 module for connecting customer-owned Cloudflare API tokens, discovering accounts and zones, binding exact or wildcard domains, provisioning expected DNS records, and monitoring drift.
+Laravel 12 module for connecting customer-owned Cloudflare API tokens, discovering accounts and zones, claiming exact or wildcard hostnames, reconciling the DNS records each claim expects, and detecting drift.
 
 This headless module is included in the MIT-licensed `trafficops/tops-infra` package.
 
@@ -33,6 +33,8 @@ $domain = Cloudflare::attachDomain(
 Cloudflare::reconcileDomain($owner, $domain->id); // explicit write
 Cloudflare::checkIntegration($owner, $integration->id); // read-only
 ```
+
+An expectation's name is the claim's hostname, or lies beneath the base of a wildcard claim: an exact claim on `app.example.com` may only expect records named `app.example.com`, while a wildcard claim `*.example.com` may expect `*.example.com` and any name beneath `example.com` other than the apex (so `_acme-challenge.example.com` is fine, `example.com` is not). `attachDomain` and `replaceDomainExpectations` reject anything else.
 
 Tokens should have `Zone Read` and `DNS Read`; explicit provisioning also needs `DNS Write`. Existing matching records are adopted but never modified or deleted. Only records created by this package are eligible for explicit cleanup.
 

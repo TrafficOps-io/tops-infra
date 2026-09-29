@@ -11,7 +11,7 @@ final class DispatchCloudflareChecksCommand extends Command
 {
     protected $signature = 'cloudflare:dispatch-checks {--chunk=100 : Integrations loaded per database chunk}';
 
-    protected $description = 'Dispatch one read-only Cloudflare check job per integration';
+    protected $description = 'Dispatch one read-only Cloudflare check job per checkable integration';
 
     public function handle(): int
     {
@@ -22,7 +22,9 @@ final class DispatchCloudflareChecksCommand extends Command
 
         $integrationClass = ModelResolver::class('integration');
         $count = 0;
+        // Invalid integrations and expired tokens are skipped: nothing about them is checked until reconnected.
         $integrationClass::query()
+            ->checkable()
             ->select('id')
             ->orderBy('id')
             ->chunkById(max(1, (int) $this->option('chunk')), function ($integrations) use ($jobClass, &$count) {

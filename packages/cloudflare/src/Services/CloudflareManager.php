@@ -45,6 +45,12 @@ use TrafficOps\Cloudflare\Support\ModelResolver;
 
 final class CloudflareManager implements CloudflareManagerContract
 {
+    /** Status of an account or zone that a Sync no longer sees through the integration. */
+    private const STATUS_INACCESSIBLE = 'inaccessible';
+
+    /** last_error_code of a claim whose zone is inaccessible. */
+    private const ERROR_ZONE_INACCESSIBLE = 'zone_inaccessible';
+
     public function __construct(
         private readonly CloudflareClientContract $client,
         private readonly PublicDnsResolverContract $dns,
@@ -158,7 +164,7 @@ final class CloudflareManager implements CloudflareManagerContract
         if (! Hostname::belongsToZone($definition->hostname, $zone->name)) {
             throw new CloudflareValidationException("Domain [{$definition->hostname}] is outside zone [{$zone->name}].");
         }
-        $this->validateExpectations($definition->records, $zone->name);
+        $this->validateExpectations($definition->records, $zone->name, $definition->hostname);
 
         $store = $this->cache->store(config('cloudflare.claim_lock_store'));
 
@@ -208,7 +214,7 @@ final class CloudflareManager implements CloudflareManagerContract
         }
 
         $domain = $this->ownedDomain($owner, $domainId);
-        $this->validateExpectations($records, $domain->zone->name);
+        $this->validateExpectations($records, $domain->zone->name, $domain->hostname);
 
         DB::transaction(function () use ($domain, $records) {
             $domain->records()->update(['desired' => false]);
@@ -390,8 +396,17 @@ final class CloudflareManager implements CloudflareManagerContract
         foreach ($domains as $domain) {
             $zoneKey = (string) $domain->zone->getKey();
             try {
-                $remoteByZone[$zoneKey] ??= $this->client->listDnsRecords($integration->api_token, $domain->zone->cloudflare_id);
-                $status = $this->checkDomain($domain, $remoteByZone[$zoneKey]);
+                if ($domain->zone->status === self::STATUS_INACCESSIBLE) {
+                    // The Sync above already found the zone gone; there is nothing to read for this claim.
+                    $status = $this->failClaimInInaccessibleZone($domain);
+                } else {
+                    $remoteByZone[$zoneKey] ??= $this->client->listDnsRecords($integration->api_token, $domain->zone->cloudflare_id);
+                    $status = $this->checkDomain($domain, $remoteByZone[$zoneKey]);
+                }
+            } catch (CloudflareNotFoundException) {
+                // The zone vanished between listZones and listDnsRecords: same transition as a Sync would make.
+                $domain->zone->update(['status' => self::STATUS_INACCESSIBLE]);
+                $status = $this->failClaimInInaccessibleZone($domain);
             } catch (CloudflarePermissionException $exception) {
                 $this->transitionDomain($domain, DomainStatus::Error, 'permission', $exception->getMessage());
                 $this->transitionIntegration($integration, IntegrationStatus::Degraded, 'permission', $exception->getMessage());
@@ -494,15 +509,16 @@ final class CloudflareManager implements CloudflareManagerContract
                     'token_expires_at' => isset($verification['expires_on']) ? Carbon::parse($verification['expires_on']) : null,
                     'last_verified_at' => now(),
                 ];
-                if ($activate) {
-                    $attributes += [
-                        'status' => IntegrationStatus::Active,
-                        'last_error_code' => null,
-                        'last_error_message' => null,
-                    ];
-                }
                 $integration->update($attributes);
                 $this->persistZones($integration, $zones);
+                if ($activate) {
+                    // Degraded: the token works but at least one claim is drifted, errored or unreachable.
+                    $integration->update([
+                        'status' => $this->hasUnhealthyClaims($integration) ? IntegrationStatus::Degraded : IntegrationStatus::Active,
+                        'last_error_code' => null,
+                        'last_error_message' => null,
+                    ]);
+                }
             });
         } catch (CloudflareAuthenticationException $exception) {
             $this->transitionIntegration($integration, IntegrationStatus::Invalid, 'authentication', $exception->getMessage());
@@ -522,13 +538,19 @@ final class CloudflareManager implements CloudflareManagerContract
         return $integration;
     }
 
-    /** @param list<array<string, mixed>> $zones */
+    /**
+     * Sync: refresh the accounts and zones an integration can see. Zones that
+     * disappeared are marked inaccessible, never deleted, and every claim inside
+     * such a zone transitions to Error.
+     *
+     * @param  list<array<string, mixed>>  $zones
+     */
     private function persistZones(CloudflareIntegration $integration, array $zones): void
     {
         $now = now();
-        $integration->accounts()->update(['status' => 'inaccessible']);
+        $integration->accounts()->update(['status' => self::STATUS_INACCESSIBLE]);
         foreach ($integration->accounts as $account) {
-            $account->zones()->update(['status' => 'inaccessible']);
+            $account->zones()->update(['status' => self::STATUS_INACCESSIBLE]);
         }
 
         foreach ($zones as $remoteZone) {
@@ -553,6 +575,28 @@ final class CloudflareManager implements CloudflareManagerContract
             );
         }
         $integration->update(['last_synced_at' => $now]);
+
+        $this->integrationDomains($integration)
+            ->filter(fn (CloudflareDomain $domain) => $domain->zone->status === self::STATUS_INACCESSIBLE)
+            ->each($this->failClaimInInaccessibleZone(...));
+    }
+
+    /**
+     * A claim whose zone is inaccessible is in Error; the transition (and its
+     * event) happens once, and a later Sync or Check leaves it untouched.
+     */
+    private function failClaimInInaccessibleZone(CloudflareDomain $domain): DomainStatus
+    {
+        if ($domain->status !== DomainStatus::Error || $domain->last_error_code !== self::ERROR_ZONE_INACCESSIBLE) {
+            $this->transitionDomain(
+                $domain,
+                DomainStatus::Error,
+                self::ERROR_ZONE_INACCESSIBLE,
+                "Zone [{$domain->zone->name}] is no longer accessible through this integration.",
+            );
+        }
+
+        return DomainStatus::Error;
     }
 
     /** @param list<DnsRecordExpectation> $records */
@@ -566,8 +610,14 @@ final class CloudflareManager implements CloudflareManagerContract
         }
     }
 
-    /** @param list<DnsRecordExpectation> $records */
-    private function validateExpectations(array $records, string $zone): void
+    /**
+     * Every expectation of a claim must sit inside the zone and be covered by
+     * the claim hostname; otherwise a claim on `a.example.com` could manage
+     * records for `b.example.com` and bypass the cross-owner overlap check.
+     *
+     * @param  list<DnsRecordExpectation>  $records
+     */
+    private function validateExpectations(array $records, string $zone, string $hostname): void
     {
         $signatures = [];
         foreach ($records as $record) {
@@ -576,6 +626,12 @@ final class CloudflareManager implements CloudflareManagerContract
             }
             if (! Hostname::belongsToZone($record->name, $zone)) {
                 throw new CloudflareValidationException("DNS record [{$record->name}] is outside zone [$zone].");
+            }
+            if (! Hostname::covers($hostname, $record->name)) {
+                throw new CloudflareValidationException(
+                    "DNS record [{$record->name}] is outside claim [$hostname]: an expectation name is the claim's hostname,"
+                    .' or lies beneath the base of a wildcard claim (never the apex itself).',
+                );
             }
             if (isset($signatures[$record->signature()])) {
                 throw new CloudflareValidationException('Duplicate DNS record expectation.');
@@ -648,6 +704,16 @@ final class CloudflareManager implements CloudflareManagerContract
         }
 
         return $domain;
+    }
+
+    private function hasUnhealthyClaims(CloudflareIntegration $integration): bool
+    {
+        $domainClass = ModelResolver::class('domain');
+
+        return $domainClass::query()
+            ->whereHas('zone.account', fn ($query) => $query->where('integration_id', $integration->getKey()))
+            ->whereIn('status', [DomainStatus::Drifted->value, DomainStatus::Error->value, DomainStatus::Unreachable->value])
+            ->exists();
     }
 
     /** @return Collection<int, CloudflareDomain> */

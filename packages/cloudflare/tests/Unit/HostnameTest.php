@@ -27,6 +27,29 @@ final class HostnameTest extends TestCase
         return [['example'], ['foo.*.example.com'], ['*.*.example.com'], ['-bad.example.com']];
     }
 
+    public function test_exact_claim_covers_only_its_own_hostname(): void
+    {
+        $this->assertTrue(Hostname::covers('app.example.com', 'app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', '_acme-challenge.app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', 'sub.app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', '*.app.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', 'example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', 'other.example.com'));
+        $this->assertFalse(Hostname::covers('app.example.com', 'notapp.example.com'));
+    }
+
+    public function test_wildcard_claim_covers_names_beneath_its_base_but_not_the_apex(): void
+    {
+        $this->assertTrue(Hostname::covers('*.example.com', '*.example.com'));
+        $this->assertTrue(Hostname::covers('*.example.com', 'app.example.com'));
+        $this->assertTrue(Hostname::covers('*.example.com', '_acme-challenge.example.com'));
+        $this->assertTrue(Hostname::covers('*.example.com', Hostname::wildcardProbe('*.example.com', 'seed')));
+        $this->assertTrue(Hostname::covers('*.example.com', '*.sub.example.com'));
+        $this->assertFalse(Hostname::covers('*.example.com', 'example.com'));
+        $this->assertFalse(Hostname::covers('*.example.com', 'example.net'));
+        $this->assertFalse(Hostname::covers('*.example.com', 'notexample.com'));
+    }
+
     public function test_detects_exact_and_wildcard_overlap(): void
     {
         $this->assertTrue(Hostname::overlaps('*.example.com', 'app.example.com'));
